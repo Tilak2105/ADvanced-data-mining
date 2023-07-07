@@ -1,0 +1,194 @@
+---
+title: "Regression Model"
+author: "Niharika D,Zachariah Alex,Rachanna Kurra,Tilak Kumar Bonala"
+date: "2023-05-04"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+#Loading Libraries
+
+```{r}
+library(caret)
+
+library(dplyr)
+
+library(corrplot)
+
+library(glmnet)
+
+library(tidyverse)
+
+library(tidyr)
+
+library(randomForest)
+
+```
+
+*Reading the already cleaned data file*
+```{r}
+data<-read.csv('data_cleaned.csv')
+
+# Create a new column called 'default' with a value of 1 is loss is above 0 and 0 is loss is 0
+
+
+data$default <- ifelse(data$loss == 0, 0, 1)
+data$default<- as.factor(data$default)
+
+
+#Normalizing loss column by dividing with 100
+data$loss <- (data$loss/100)
+
+
+#Creating subset of customers who have defaulted (i.e loss > 0)
+
+default_customers<- subset(data, data$default == 1)
+
+
+```
+*Create a preprocessing model that eliminates near zero variance variables, highly correlated variables, and then does the imputation of missing values with the median*
+
+
+```{r}
+
+data1<-select(default_customers,-c(f736,f764))
+
+preProcessModel <- preProcess(data1[,-c(701,702)], method = c("nzv", "corr", "medianImpute"))
+Preprocessed_default <- predict(preProcessModel, data1)
+
+
+```
+
+*Feature selection for regression(loss) using Lasso*
+
+```{r}
+
+set.seed(3456)
+
+X1 <- as.matrix(Preprocessed_default[ ,-c(258,259)])
+Y1 <- as.vector(Preprocessed_default$loss)
+
+
+lasso_model <- cv.glmnet(X1, Y1, alpha = 1, family = "gaussian", nfolds = 10, type.measure = "mae")
+
+
+summary(lasso_model)
+
+plot(lasso_model)
+
+#Finding the minimum value of lambda
+
+lasso_model$lambda.min
+
+#Finding the coefficients at minimum lambda value
+
+cv_lasso_coefs <- coef(lasso_model, s = "lambda.min")
+cv_lasso_coefs
+
+#Converting coefficients obtained into a dataframe
+
+cv_lasso_coefs <- data.frame(name = cv_lasso_coefs@Dimnames[[1]][cv_lasso_coefs@i + 1], coefficient = cv_lasso_coefs@x)
+
+
+#Removing the intercept from the coefficient data frame
+
+cv_lasso_coefs <- cv_lasso_coefs[-1, ]
+
+
+#Converting the coefficient data frame to vector
+
+cv_lasso_coefs <- as.vector(cv_lasso_coefs$name)
+
+#Adding loss variable back to the vector
+
+cv_lasso_coefs1 <- c(cv_lasso_coefs,"loss")
+
+
+#Combining the columns selected by lasso with variable selection and forming a new dataset
+
+data_new<-select(default_customers,cv_lasso_coefs1)
+
+```
+
+*Creating training and test partition with 70% for training and 30% for test*
+
+```{r}
+
+set.seed(6782)
+
+Split_data <- createDataPartition(data_new$loss,p=.7,list=FALSE,times=1)
+Training <- data_new[Split_data,]
+Validation <- data_new[-Split_data,]
+
+```
+
+*Building Bagged Decision Tree model using Random Forest*
+```{r}
+
+num_trees <- 100 #number of trees
+sample_size <- 50 #size of the bootstrap sample used to grow each tree
+
+# Building the Bagged Decision Tree Regression model
+
+bagged_model <- randomForest(loss ~ ., data = Training, 
+                             ntree = num_trees, 
+                             mtry = 10, 
+                             sampsize = sample_size, 
+                             replace = TRUE)
+
+summary(bagged_model)
+
+Predictions<- predict(bagged_model, Validation)
+
+```
+
+#Calculating MAE for the model
+```{r}
+
+MAE<-MAE(Predictions,Validation$loss,na.rm=TRUE)
+MAE
+
+```
+
+*Reading and preprocessing Test Data*
+```{r}
+
+data10<-read.csv("new_defaulted_test_customers.csv")
+
+#Replacing null values with zeroes
+
+data11 <- data10 %>% mutate_all(funs(replace_na(.,0)))
+
+null_percent <- apply(data11 == 0, 2, mean)
+
+#Removing columns having more than 30% null values
+
+cols <- names(null_percent[null_percent <= 0.3])
+
+new_test_file <- data11[, cols]
+
+
+#Check if the columns with more than 30% null values are deleted
+
+Sums<-(colSums(new_test_file==0)/nrow(new_test_file))*100
+
+#Combining the variables from lasso model with test data to obtain a new test data with selected variables
+
+Test_data_new<-select(new_test_file,cv_lasso_coefs)
+
+
+```
+
+*Running the model on test data*
+```{r}
+
+Test_loss_Predictions<-predict(bagged_model, Test_data_new)
+
+
+write.csv(Test_loss_Predictions,file="Final_Predictions.csv")
+```

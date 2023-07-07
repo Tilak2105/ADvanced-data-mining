@@ -1,0 +1,315 @@
+---
+title: "Classification Model"
+author: "Niharika D,Zachariah Alex,Rachana Kurra,Tilak Kumar Bonala"
+date: "2023-05-04"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+knitr::opts_chunk$set(warning = FALSE)
+```
+
+*loading required packages*
+```{r}
+
+library(caret)
+
+library(dplyr)
+
+library(corrplot)
+
+library(glmnet)
+
+library(tidyverse)
+
+```
+
+*Reading the data file*
+
+```{r}
+data<-read.csv("train_v3.csv")
+
+```
+
+*Clearing the Null values and checking for percentage of null values in each column*
+
+```{r}
+
+#Replacing all NA values with 0 
+
+data1 <- data %>% mutate_all(funs(replace_na(.,0)))
+   
+   
+
+# Calculate the percentage of 0 values in each column
+
+null_percent <- apply(data1 == 0, 2, mean)
+
+
+# Get the names of the columns with less than or equal to 30% of 0(null) values
+
+cols <- names(null_percent[null_percent <= 0.3])
+
+# Create a new data frame with the selected columns
+
+data2 <- data1[, cols]
+
+#Check if the columns with more than 30% null values are deleted
+
+sums<-(colSums(data2==0)/nrow(data2))*100
+
+#Adding loss column back to data
+
+data3<-cbind(data2,loss=data1$loss)
+
+# Create a new column called 'default' with a value of 1 is loss is above 0 and 0 is loss is 0
+
+
+data3$default <- ifelse(data3$loss == 0, 0, 1)
+
+
+
+```
+
+*Reading cleaned data file *
+```{r}
+
+data<-data3
+```
+
+*Clearing columns with near zero variance,high correlation and median imputation for missing values for smooth running in the model*
+```{r}
+
+
+data<-data[ ,-c(data$f736,data$f764)]
+
+preProcessModel <- preProcess(data, method = c("nzv", "corr", "medianImpute"))
+
+data1 <- predict(preProcessModel, data)
+```
+
+**After data cleaning we are left with 261 columns**
+
+
+*Building a lasso model*
+```{r}
+
+#Creating a matrix 
+
+X <- as.matrix(data1[ ,-c(261)])
+
+#Setting default column to factor levels
+
+Y <- as.vector(as.factor(data1$default))
+
+#Building the model with 10 fold cross-validation and performance measure as AUC curve
+
+model<- cv.glmnet(X, Y, alpha = 1, family = "binomial", nfolds = 10, type.measure = "auc")
+
+summary(model)
+
+plot(model)
+#Finding minimum value for lambda
+
+model$lambda.min
+
+#Saving the coefficients for lambda minimum
+
+coefs <- coef(model, s = "lambda.min")
+
+# Taking the coefficient values into a data frame for processing
+
+coefs <- data.frame(name = coefs@Dimnames[[1]][coefs@i + 1], coefficient = coefs@x)
+
+# Rounding to the absolute value of all the coefficients in the model
+
+coefs$coefficient <- abs(coefs$coefficient)
+
+# Finding the largest coefficient in the model
+
+coefs <- coefs[order(coefs$coefficient, decreasing = TRUE), ]
+
+
+# Taking out the intercept from the data frame
+
+coefs <- coefs[-1, ]
+
+#Converting the coefficients to a  vector type
+
+coefs <- as.vector(coefs$name)
+
+#Combining the default column back to the coefficients
+
+coefs <- c(coefs,"default")
+
+data_new<-select(data1,coefs)
+
+
+```
+
+
+*Splitting data into 85% training and 15% validation*
+
+```{r}
+
+#Splitting data into Training and Validation
+
+set.seed(6782)
+
+Split_data <- createDataPartition(data_new$default,p=.85,list=FALSE,times=1)
+
+Training <- data_new[Split_data,]
+
+Validation <- data_new[-Split_data,]
+
+```
+
+
+*Building a Gradient Boosting Machine model *
+
+```{r}
+
+library(gbm)
+
+#Cross-vlidation with 10 folds and number of trees are set to 50
+
+gbm_model <- gbm(default ~ ., data = Training, distribution = "bernoulli",
+                 n.trees = 100, interaction.depth = 9, shrinkage = 0.02, 
+                 bag.fraction = 0.8, train.fraction = 0.85, 
+                 n.minobsinnode = 15,cv.folds = 10)
+
+
+summary(gbm_model)
+
+
+
+predictions <- predict(gbm_model, newdata = Validation, n.trees = 100, type = "response")
+
+#Threshold value is set to 50 % 
+
+predictions<-ifelse(predictions>0.5,1,0)
+
+# Building Confusion Matrix
+
+Final_data<-cbind(Validation,predictions)
+
+
+Final_data$predictions<-as.factor(Final_data$predictions)
+
+Final_data$default<-as.factor(Final_data$default)
+
+confusionMatrix<-confusionMatrix(Final_data$default,Final_data$predictions)
+confusionMatrix
+
+#Precision<- TP/TP+FP = 0.005%
+```
+*Here Precision was found to be very low .This was expected because from our EDA we have seen that the data has imbalanced classes of default to non-default with almost 1:10 ratio.Therefore we will use stratified sampling for splitting and run the model again*
+
+```{r}
+
+data_sample<-data_new
+
+# Calculate the smallest class size
+
+min_length <- min(table(data_sample$default))
+
+# Sample the minority class to the size of the smallest class
+
+balanced_spam <- data_sample %>%group_by(default) %>%sample_n(min_length) %>%ungroup()
+
+# Check the class distribution after balancing
+
+table(balanced_spam$default)
+
+```
+
+*Splitting data into 15% test and 85% train within our balanced data*
+```{r}
+
+set.seed(6782)
+
+
+Split_data_sample <- createDataPartition(balanced_spam$default,p=.85,list=FALSE,times=1)
+
+Training_sample <- balanced_spam[Split_data_sample,]
+
+Validation_sample <- balanced_spam[-Split_data_sample,]
+
+
+
+```
+
+*Building the model again using the new representative dataset*
+```{r}
+
+
+library(gbm)
+gbm_model <- gbm(default ~ ., data = Training_sample, distribution = "bernoulli",
+                 n.trees = 50, interaction.depth = 5, shrinkage = 0.02, 
+                 bag.fraction = 0.80, train.fraction = 0.85, 
+                 n.minobsinnode = 25,cv.folds = 10)
+summary(gbm_model)
+cv_error<-gbm.perf(gbm_model,method="cv")
+
+cv_error
+
+
+
+```
+
+*Predicition on Validation data*
+```{r}
+
+
+predictions_sample <- predict(gbm_model, newdata = Validation_sample, n.trees = 50, type = "response")
+
+
+# Here the threshold value is set to be 35% ,that we are becoming more pickier while selecting customer who is credit-worthy.
+
+predictions_sample<-ifelse(predictions_sample>0.35,1,0)
+
+
+Final_data_sample<-cbind(Validation_sample,predictions_sample)
+
+
+Final_data_sample$predictions_sample<-as.factor(Final_data_sample$predictions_sample)
+
+Final_data_sample$default<-as.factor(Final_data_sample$default)
+
+#Building Confusion Matrix
+
+confusionMatrix_sample<-confusionMatrix(Final_data_sample$default,Final_data_sample$predictions_sample)
+
+confusionMatrix_sample
+
+
+```
+
+*Calculating Precision for the new model*
+
+*Precision<-TP/(TP+FP)= 1004/(1004+102)=90.77%*
+
+*Running the model on test data*
+```{r}
+Test_data<-read.csv("testv3.csv")
+
+Test_Prediction<-predict(gbm_model, newdata = Test_data, n.trees = 50, type = "response")
+
+
+Test_Prediction<-ifelse(Test_Prediction>0.35,1,0)
+
+
+Test_datafile<- cbind(Test_data,Test_Prediction)
+
+
+Default_test<- subset(Test_datafile, Test_datafile$Test_Prediction == 1)
+
+
+#Writing data frame to a new csv file containing the list of customers who defaults the loan
+
+#write.csv(Default_test,file="defaulted_test_customers.csv")
+```
+
